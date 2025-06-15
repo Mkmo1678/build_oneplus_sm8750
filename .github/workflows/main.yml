@@ -1,0 +1,18 @@
+name: Build Kernel SM8750
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set script permissions
+        run: chmod +x Build_Kernel_sm8750.sh
+
+      - name: Run build script
+        run: ./Build_Kernel_sm8750.sh
