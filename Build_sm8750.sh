@@ -24,7 +24,8 @@ info "请选择要编译的机型："
 info "1. 一加 Ace 5 Pro"
 info "2. 一加 13"
 info "3.一加 13T"
-read -p "输入选择 [1-3]: " device_choice
+info "4.一加 Pad 2 Pro"
+read -p "输入选择 [1-4]: " device_choice
 
 case $device_choice in
     1)
@@ -42,13 +43,19 @@ case $device_choice in
         REPO_MANIFEST="oneplus_13t.xml"
         KERNEL_TIME="Tue Dec 17 23:36:49 UTC 2024"
         ;;
+    4)
+        DEVICE_NAME="oneplus_pad_2_pro"
+        REPO_MANIFEST="oneplus_pad_2_pro.xml"
+        KERNEL_TIME="Tue Dec 17 23:36:49 UTC 2024"
+        ;;
     *)
         error "无效的选择，请输入1-3之间的数字"
         ;;
 esac
 
 # 自定义补丁
-read -p "输入内核名称修改(可改中文和emoji) [回车默认官核名称]: " input_suffix
+
+read -p "输入内核名称修改(可改中文和emoji 回车默认): " input_suffix
 [ -n "$input_suffix" ] && KERNEL_SUFFIX="$input_suffix"
 
 read -p "输入内核构建日期更改(回车默认为原厂) : " input_time
@@ -57,7 +64,7 @@ read -p "输入内核构建日期更改(回车默认为原厂) : " input_time
 read -p "是否启用kpm?(回车默认开启) [y/N]: " kpm
 [[ "$kpm" =~ [yY] ]] && ENABLE_KPM=true
 
-read -p "是否启用lz4kd?(回车默认开启) [y/N]: " lz4
+read -p "是否启用lz4+zstd?(回车默认开启) [y/N]: " lz4
 [[ "$lz4" =~ [yY] ]] && ENABLE_LZ4KD=true
 
 # 环境变量 - 按机型区分ccache目录
@@ -91,7 +98,7 @@ cd "$WORKSPACE" || error "无法进入工作目录"
 
 # 检查并安装依赖
 info "检查并安装依赖..."
-DEPS=(python3 git curl ccache flex bison libssl-dev libelf-dev bc zip)
+DEPS=(make python3 git curl ccache flex bison libssl-dev libelf-dev bc zip)
 MISSING_DEPS=()
 
 for pkg in "${DEPS[@]}"; do
@@ -143,7 +150,7 @@ cd "$KERNEL_WORKSPACE" || error "无法进入kernel_workspace目录"
 
 # 初始化源码
 info "初始化repo并同步源码..."
-repo init -u https://github.com/HanKuCha/kernel_manifest.git -b refs/heads/oneplus/sm8750 -m "$REPO_MANIFEST" --depth=1 || error "repo初始化失败"
+repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/sm8750 -m "$REPO_MANIFEST" --depth=1 || error "repo初始化失败"
 repo --trace sync -c -j$(nproc --all) --no-tags || error "repo同步失败"
 
 # ==================== 核心构建步骤 ====================
@@ -156,17 +163,19 @@ rm -f kernel_platform/msm-kernel/android/abi_gki_protected_exports_*
 # 设置SukiSU
 info "设置SukiSU..."
 cd kernel_platform || error "进入kernel_platform失败"
-curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main || error "SukiSU设置失败"
+curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/susfs-1.5.8/kernel/setup.sh" | bash -s susfs-1.5.8 || error "SukiSU设置失败"
 
 cd KernelSU || error "进入KernelSU目录失败"
-KSU_VERSION=$(expr $(/usr/bin/git rev-list --count main) "+" 10606)
+KSU_VERSION=$(expr $(/usr/bin/git rev-list --count main) "+" 10700)
 export KSU_VERSION=$KSU_VERSION
 sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile || error "修改KernelSU版本失败"
+info "$KSU_VERSION"
 
 # 设置susfs
 info "设置susfs..."
 cd "$KERNEL_WORKSPACE" || error "返回工作目录失败"
 git clone -q https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android15-6.6 || info "susfs4ksu已存在或克隆失败"
+git clone https://github.com/Xiaomichael/kernel_patches.git
 git clone -q https://github.com/SukiSU-Ultra/SukiSU_patch.git || info "SukiSU_patch已存在或克隆失败"
 
 cd kernel_platform || error "进入kernel_platform失败"
@@ -174,11 +183,11 @@ cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch ./common/
 cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
 cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
 
-# 复制lz4k文件
-cp -r ../SukiSU_patch/other/zram/lz4k/include/linux/* ./common/include/linux
-cp -r ../SukiSU_patch/other/zram/lz4k/lib/* ./common/lib
-cp -r ../SukiSU_patch/other/zram/lz4k/crypto/* ./common/crypto
-cp -r ../SukiSU_patch/other/zram/lz4k_oplus ./common/lib/
+if [ "$ENABLE_LZ4KD" = "true"]; then
+  cp ../kernel_patches/001-lz4.patch ./common/
+  cp ../kernel_patches/lz4armv8.S ./common/lib
+  cp ../kernel_patches/002-zstd.patch ./common/
+fi
 
 cd $KERNEL_WORKSPACE/kernel_platform/common || { echo "进入common目录失败"; exit 1; }
 
@@ -198,111 +207,58 @@ fi
 patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || info "SUSFS补丁应用可能有警告"
 cp "$KERNEL_WORKSPACE/SukiSU_patch/hooks/syscall_hooks.patch" ./ || error "复制syscall_hooks.patch失败"
 patch -p1 -F 3 < syscall_hooks.patch || info "syscall_hooks补丁应用可能有警告"
+if [ "ENABLE_LZ4KD" = "true" ]; then
+  git apply -p1 < 001-lz4.patch || true
+  patch -p1 < 002-zstd.patch || true
+fi
 
 # 应用HMBird GKI补丁
-info "应用HMBird GKI补丁..."
-cd drivers || error "进入drivers目录失败"
-cat << 'EOF' > hmbird_patch.c
-#include <linux/init.h>
-#include <linux/module.h>
-#include <linux/of.h>
-#include <linux/slab.h>
-#include <linux/string.h>
+apply_hmbird_patch() {
+    info "开始应用HMBird GKI补丁..."
+    
+    # 进入目录（带错误检查）
+    cd drivers || error "进入drivers目录失败"
+    
+    # 设置补丁URL（移除local关键字）
+    patch_url="https://raw.githubusercontent.com/showdo/build_oneplus_sm8750/main/hmbird_patch.c"
+    
+    info "从GitHub下载补丁文件..."
+    if ! curl -sSLo hmbird_patch.c "$patch_url"; then
+        error "补丁下载失败，请检查网络或URL: $patch_url"
+    fi
 
-static int __init hmbird_patch_init(void)
-{
-    struct device_node *ver_np;
-    const char *type;
-    int ret;
+    # 验证文件内容
+    if ! grep -q "MODULE_DESCRIPTION" hmbird_patch.c; then
+        error "下载的文件不完整或格式不正确"
+    fi
 
-    ver_np = of_find_node_by_path("/soc/oplus,hmbird/version_type");
-    if (!ver_np) {
-         pr_info("hmbird_patch: version_type node not found\n");
-         return 0;
-    }
+    # 更新Makefile
+    info "更新Makefile配置..."
+    if ! grep -q "hmbird_patch.o" Makefile; then
+        echo "obj-y += hmbird_patch.o" >> Makefile || error "写入Makefile失败"
+    fi
 
-    ret = of_property_read_string(ver_np, "type", &type);
-    if (ret) {
-         pr_info("hmbird_patch: type property not found\n");
-         of_node_put(ver_np);
-         return 0;
-    }
-
-    if (strcmp(type, "HMBIRD_OGKI")) {
-         of_node_put(ver_np);
-         return 0;
-    }
-
-    struct property *prop = of_find_property(ver_np, "type", NULL);
-    if (prop) {
-         struct property *new_prop = kmalloc(sizeof(*prop), GFP_KERNEL);
-         if (!new_prop) {
-              pr_info("hmbird_patch: kmalloc for new_prop failed\n");
-              of_node_put(ver_np);
-              return 0;
-         }
-         memcpy(new_prop, prop, sizeof(*prop));
-         new_prop->value = kmalloc(strlen("HMBIRD_GKI") + 1, GFP_KERNEL);
-         if (!new_prop->value) {
-              pr_info("hmbird_patch: kmalloc for new_prop->value failed\n");
-              kfree(new_prop);
-              of_node_put(ver_np);
-              return 0;
-         }
-         strcpy(new_prop->value, "HMBIRD_GKI");
-         new_prop->length = strlen("HMBIRD_GKI") + 1;
-
-         if (of_remove_property(ver_np, prop) != 0) {
-              pr_info("hmbird_patch: of_remove_property failed\n");
-              return 0;
-         }
-         if (of_add_property(ver_np, new_prop) !=0) {
-              pr_info("hmbird_patch: of_add_property failed\n");
-              return 0;
-         }
-         pr_info("hmbird_patch: success from HMBIRD_OGKI to HMBIRD_GKI\n");
-    }
-    else {
-         pr_info("hmbird_patch: type property structure not found\n");
-    }
-    of_node_put(ver_np);
-    return 0;
+    info "HMBird补丁应用成功！"
 }
-early_initcall(hmbird_patch_init);
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("reigadegr");
-MODULE_DESCRIPTION("Forcefully convert HMBIRD_OGKI to HMBIRD_GKI.");
-EOF
 
-if ! grep -q "hmbird_patch.o" Makefile; then
-    echo "obj-y += hmbird_patch.o" >> Makefile
-fi
+# 主流程
+apply_hmbird_patch
 
 # 返回common目录
 cd .. || error "返回common目录失败"
-
-# 应用lz4kd补丁
-if [ "$ENABLE_LZ4KD" = true ]; then
-    info "应用lz4kd补丁..."
-    # 使用绝对路径确保正确找到补丁文件
-    cp "$KERNEL_WORKSPACE/SukiSU_patch/other/zram/zram_patch/6.6/lz4kd.patch" ./ || error "复制lz4kd补丁失败"
-    patch -p1 -F 3 < lz4kd.patch || info "lz4kd补丁应用可能有警告"
-fi
-
+cd arch/arm64/configs || error "进入configs目录失败"
 # 添加SUSFS配置
 info "添加SUSFS配置..."
-cd arch/arm64/configs || error "进入configs目录失败"
 echo -e "CONFIG_KSU=y
 CONFIG_KSU_SUSFS_SUS_SU=n
 CONFIG_KSU_MANUAL_HOOK=y
 CONFIG_KSU_SUSFS=y
 CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
-CONFIG_KSU_SUSFS_SUS_PATH=y
+CONFIG_KSU_SUSFS_SUS_PATH=n
 CONFIG_KSU_SUSFS_SUS_MOUNT=y
 CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
 CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
 CONFIG_KSU_SUSFS_SUS_KSTAT=y
-CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n
 CONFIG_KSU_SUSFS_TRY_UMOUNT=y
 CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
 CONFIG_KSU_SUSFS_SPOOF_UNAME=y
@@ -311,9 +267,19 @@ CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
 CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
 CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
 CONFIG_CRYPTO_LZ4HC=y
+CONFIG_CRYPTO_LZ4=y
 CONFIG_CRYPTO_LZ4K=y
-CONFIG_CRYPTO_LZ4KD=y
 CONFIG_CRYPTO_842=y
+# BBR
+CONFIG_TCP_CONG_ADVANCED=y
+CONFIG_TCP_CONG_BBR=y
+CONFIG_NET_SCH_FQ=y
+CONFIG_TCP_CONG_BIC=n
+CONFIG_TCP_CONG_CUBIC=n
+CONFIG_TCP_CONG_WESTWOOD=n
+CONFIG_TCP_CONG_HTCP=n
+CONFIG_DEFAULT_TCP_CONG=bbr
+
 CONFIG_LOCALVERSION_AUTO=n" >> gki_defconfig
 
 # 返回kernel_platform目录
@@ -350,14 +316,17 @@ export PATH="/usr/lib/ccache:$PATH"
 
 cd $KERNEL_WORKSPACE/kernel_platform/common || error "进入common目录失败"
 
-make LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang \
-O=out olddefconfig
-
+# 生成.config
 make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang \
-RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc \
-PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole \
-LD=ld.lld HOSTLD=ld.lld O=out KCFLAGS+=-O2 Image
+  RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc \
+  PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole \
+  LD=ld.lld HOSTLD=ld.lld O=out KCFLAGS+=-O2 gki_defconfig || error "生成配置失败"
 
+# 编译 Image（内核镜像）
+make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang \
+  RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc \
+  PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole \
+  LD=ld.lld HOSTLD=ld.lld O=out KCFLAGS+=-O2 Image || error "内核构建失败"
 
 
 # 应用Linux补丁
@@ -367,12 +336,12 @@ curl -LO https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/downl
 chmod +x patch_linux
 ./patch_linux || error "应用patch_linux失败"
 rm -f Image
-mv oImage Image || error "重命名Image失败"
+mv oImage Image || error "替换Image失败"
 
 # 创建AnyKernel3包
 info "创建AnyKernel3包..."
 cd "$WORKSPACE" || error "返回工作目录失败"
-git clone -q https://github.com/Kernel-SU/AnyKernel3.git --depth=1 || info "AnyKernel3已存在"
+git clone -q https://github.com/showdo/AnyKernel3.git --depth=1 || info "AnyKernel3已存在"
 rm -rf ./AnyKernel3/.git
 rm -f ./AnyKernel3/push.sh
 cp "$KERNEL_WORKSPACE/kernel_platform/common/out/arch/arm64/boot/Image" ./AnyKernel3/ || error "复制Image失败"
@@ -383,15 +352,13 @@ zip -r "AnyKernel3_${KSU_VERSION}_${DEVICE_NAME}_SuKiSu.zip" ./* || error "打�
 
 # 创建C盘输出目录（通过WSL访问Windows的C盘）
 WIN_OUTPUT_DIR="/mnt/c/Kernel_Build/${DEVICE_NAME}/"
-mkdir -p "$WIN_OUTPUT_DIR" || info "无法创建Windows目录，可能未挂载C盘，将保存到Linux目录"
+mkdir -p "$WIN_OUTPUT_DIR" || error "无法创建Windows目录，可能未挂载C盘，将保存到Linux目录:$WORKSPACE/AnyKernel3/AnyKernel3_${KSU_VERSION}_${DEVICE_NAME}_SuKiSu.zip"
 
 # 复制Image和AnyKernel3包
 cp "$KERNEL_WORKSPACE/kernel_platform/common/out/arch/arm64/boot/Image" "$WIN_OUTPUT_DIR/"
 cp "$WORKSPACE/AnyKernel3/AnyKernel3_${KSU_VERSION}_${DEVICE_NAME}_SuKiSu.zip" "$WIN_OUTPUT_DIR/"
 
+rm -rf $WORKSPACE
 info "内核包路径: C:/Kernel_Build/${DEVICE_NAME}/AnyKernel3_${KSU_VERSION}_${DEVICE_NAME}_SuKiSu.zip"
 info "Image路径: C:/Kernel_Build/${DEVICE_NAME}/Image"
 info "请在C盘目录中查找内核包和Image文件。"
-info "清理本次构建的所有文件..."
-sudo rm -rf "$WORKSPACE" || info "无法删除工作目录，可能未创建"
-info "清理完成！下次运行脚本将重新拉取源码并构建内核。"
